@@ -25,7 +25,7 @@
       receipt-judge &amp; tts-bertvits2 中的批处理
     </h3>
     <p style="color:#94a3b8; font-size:.6em; margin-top:2em;">
-      汇报人：李明燕 &nbsp;·&nbsp; 重点：与课题相关的批处理设计
+      汇报人：李名言 &nbsp;·&nbsp; 重点：与课题相关的批处理设计
     </p>
   </section>
 
@@ -448,6 +448,104 @@ flowchart TB
         AUTO 语种下还要先按句拆 zh / en 两组，再分别批量过 BERT，
         因为 BERT 模型本身不共享。
       </p>
+    </section>
+
+    <!-- ==================== 性能 · 海光 DCU 实测 ==================== -->
+    <section>
+      <h3>性能实测：海光 DCU K100-AI 平台 <span class="tag">软件验收</span></h3>
+      <div class="two-col">
+        <div>
+          <h4>测试环境</h4>
+          <ul>
+            <li>服务器：浪潮 5468H3</li>
+            <li>CPU：2× 海光 C86-4G 7490</li>
+            <li>内存：1024 GB</li>
+            <li>加速卡：8× 海光 K100-AI DCU</li>
+            <li>OS：Ubuntu 22.04</li>
+            <li>测试日期：2025-11-18</li>
+          </ul>
+        </div>
+        <div>
+          <h4>结论摘要</h4>
+          <ul>
+            <li>CUDA 生态高度兼容：通过 <code>torch</code> 无缝迁移，
+              与英伟达侧持平。</li>
+            <li>单卡 <strong>100 并发</strong>稳定跑出
+              <em>7.1 RPS</em> 的串行 /tts 吞吐。</li>
+            <li>批处理接口（袋装）在并发 1、每批 50~100 条下
+              达到 <em>5.6 RPS</em>。</li>
+            <li>AES 加密通信、推理结果落盘、日志、SQLite 写入全部正常。</li>
+          </ul>
+        </div>
+      </div>
+      <p class="small">
+        以下两页直接引用《基于海光 DCU 平台的通达海 tts_bertvits2 模型测试报告》中的 Locust 压测原图。
+      </p>
+    </section>
+
+    <!-- 串行 /tts 性能图（直接抠自报告 p.5） -->
+    <section>
+      <h3>串行 /tts 接口 · 100 并发压测</h3>
+      <div class="report-figure">
+        <img src="assets/report-07.png" alt="K100-AI 单卡 串行 tts 接口 Locust 测试图" />
+      </div>
+      <p class="small">
+        关键指标：<strong>RPS = 7.1</strong> · Median = 15000 ms · 95%ile = 18000 ms ·
+        Failures = 0 · 共 811 请求。来源：测试报告 p.5（图直接抠自报告原文）。
+      </p>
+    </section>
+
+    <!-- tts_bag 性能图（直接抠自报告 p.6） -->
+    <section>
+      <h3>tts_bag 批处理接口 · 袋装压测</h3>
+      <div class="report-figure">
+        <img src="assets/report-08.png" alt="K100-AI 单卡 串行 tts_bag 接口 Locust 测试图" />
+      </div>
+      <p class="small">
+        每批随机 50~100 条文本，settler 视角 <strong>RPS = 5.6</strong>，
+        wrapper 视角 11 个 bag。Median = 11000 ms · Avg = 11063 ms · Failures = 0 ·
+        共 881 settler 请求。<br/>
+        注：bag 接口"每次处理多条 + 随机条数"，结果<em>不严格等价</em>
+        串行接口，仅供参考（与报告说明一致）。
+      </p>
+    </section>
+
+    <!-- 解读：把数字翻译成 batch 视角 -->
+    <section>
+      <h3>把数字翻译成 batch 视角</h3>
+      <table class="cmp">
+        <thead>
+          <tr>
+            <th>接口</th>
+            <th>并发模型</th>
+            <th>吞吐</th>
+            <th>等效 batch_size</th>
+            <th>意义</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="hl">
+            <td>串行 /tts</td>
+            <td>100 client、阶梯增压</td>
+            <td>7.1 RPS</td>
+            <td>由 TTSBus 时间窗动态聚合</td>
+            <td>线上 SLA 场景的"真"吞吐基线</td>
+          </tr>
+          <tr>
+            <td>tts_bag</td>
+            <td>1 client、袋内 50~100</td>
+            <td>5.6 RPS（settler）</td>
+            <td>≈ 75（袋大小均值）</td>
+            <td>离线批合成上限，验证 GPU 没浪费</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="callout">
+        7.1 ≈ 5.6 这件事本身说明：当 TTSBus 把请求<em>聚合到合适的 batch</em>后，
+        在线接口的吞吐已经逼近"客户端预聚合"的理论上限。
+        也就是说前面那套<strong>公交发车 + group_key 分组</strong>的调度，
+        已经把 GPU 压到了和袋装接口相同的算力区间。
+      </div>
     </section>
 
     <!-- 时序图：一次发车的耗时分解 -->
