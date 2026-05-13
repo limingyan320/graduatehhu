@@ -432,7 +432,7 @@ flowchart LR
       <div class="mermaid">
 flowchart TB
   REQ[一批 tasks] --&gt; LOOP{每段文本}
-  LOOP --&gt; KEY[cache_key = norm|lang|style|weight]
+  LOOP --&gt; KEY["cache_key = norm | lang | style | weight"]
   KEY --&gt; HIT{命中?}
   HIT -- 是 --&gt; USE[直接拿到 BERT 张量<br/>cache_hits++]
   HIT -- 否 --&gt; MISS[加入 miss 列表<br/>cache_miss++]
