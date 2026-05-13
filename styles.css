@@ -1,0 +1,135 @@
+/* ronnbunn · reveal.js 自定义样式 */
+
+.reveal {
+  font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: #1f2937;
+}
+
+.reveal h1, .reveal h2, .reveal h3, .reveal h4 {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  margin-bottom: 0.5em;
+}
+
+.reveal h1 { font-size: 2.0em; }
+.reveal h2 { font-size: 1.5em; color: #0f172a; }
+.reveal h3 { font-size: 1.2em; color: #1e293b; }
+.reveal h4 { font-size: 1.0em; color: #334155; margin-bottom: 0.3em; }
+
+.reveal p, .reveal li {
+  line-height: 1.5;
+  font-size: 0.62em;
+}
+
+.reveal ul, .reveal ol {
+  display: block;
+  margin-left: 1.2em;
+}
+
+.reveal em {
+  font-style: normal;
+  color: #b91c1c;
+}
+
+.reveal strong { color: #1d4ed8; }
+
+.reveal code {
+  background: #f1f5f9;
+  border-radius: 4px;
+  padding: 0 .25em;
+  color: #be123c;
+  font-size: 0.85em;
+}
+
+.reveal .small {
+  font-size: 0.48em !important;
+  color: #475569;
+  margin-top: 0.8em;
+}
+
+.reveal .tag {
+  display: inline-block;
+  background: #dc2626;
+  color: white;
+  font-size: 0.45em;
+  padding: 0.1em 0.6em;
+  border-radius: 999px;
+  vertical-align: middle;
+  margin-left: 0.4em;
+}
+
+/* callout 框 */
+.reveal .callout {
+  margin: 1em auto 0;
+  padding: 0.8em 1.1em;
+  background: #fef9c3;
+  border-left: 4px solid #ca8a04;
+  color: #713f12;
+  font-size: 0.55em;
+  text-align: left;
+  border-radius: 4px;
+  max-width: 90%;
+}
+
+/* 两列布局 */
+.reveal .two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.6em;
+  text-align: left;
+  margin-top: 0.5em;
+}
+
+.reveal .two-col h4 {
+  border-bottom: 2px solid #cbd5e1;
+  padding-bottom: 0.2em;
+  margin-bottom: 0.5em;
+}
+
+/* 目录 */
+.reveal .agenda {
+  text-align: left;
+  font-size: 0.8em;
+  max-width: 720px;
+  margin: 1em auto;
+}
+.reveal .agenda li { padding: 0.4em 0; }
+
+/* 对比表 */
+.reveal table.cmp {
+  margin: 0.5em auto;
+  border-collapse: collapse;
+  font-size: 0.5em;
+  width: 96%;
+}
+.reveal table.cmp th, .reveal table.cmp td {
+  border: 1px solid #cbd5e1;
+  padding: 0.45em 0.7em;
+  text-align: left;
+  vertical-align: top;
+}
+.reveal table.cmp th {
+  background: #f1f5f9;
+  font-weight: 600;
+  color: #0f172a;
+}
+.reveal table.cmp tr.hl td {
+  background: #fef9c3;
+}
+
+/* mermaid 区域：白底，等比缩放 */
+.reveal .mermaid {
+  background: #ffffff;
+  padding: 0.6em;
+  margin: 0.4em auto;
+  max-width: 100%;
+  text-align: center;
+  overflow: visible;
+}
+
+.reveal .mermaid svg {
+  max-width: 100% !important;
+  height: auto !important;
+  max-height: 520px;
+}

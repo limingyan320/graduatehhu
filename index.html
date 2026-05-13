@@ -1,0 +1,653 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>工作汇报 · receipt-judge / tts-bertvits2 批处理</title>
+
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reset.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/white.css" id="theme" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/monokai.css" />
+
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div class="reveal">
+<div class="slides">
+
+  <!-- ============================================================
+       封面
+       ============================================================ -->
+  <section data-background-color="#0f172a">
+    <h1 style="color:#f8fafc; font-size:1.8em;">工作汇报</h1>
+    <h3 style="color:#cbd5e1; font-weight:400; margin-top:.4em;">
+      receipt-judge &amp; tts-bertvits2 中的批处理
+    </h3>
+    <p style="color:#94a3b8; font-size:.6em; margin-top:2em;">
+      汇报人：李明燕 &nbsp;·&nbsp; 重点：与课题相关的批处理设计
+    </p>
+  </section>
+
+  <!-- ============================================================
+       本次重点说明
+       ============================================================ -->
+  <section>
+    <h2>这次汇报选了什么</h2>
+    <ul>
+      <li>近期工作涵盖 <em>票据 OCR、语音合成、链路联调、政府查验</em> 等多个方向。</li>
+      <li>本次只挑两个项目，且只展开两个项目里的<strong>批处理</strong>部分 ——
+        因为它们和课题的<strong>「请求聚合 / 批量推理 / 调度」</strong>主题最贴。</li>
+      <li>其余工作（OA 对接、SSE 流式提取、政府查验自动化等）暂不展开。</li>
+    </ul>
+
+    <div class="callout">
+      所有流程图均按当前实际代码绘制：
+      <code>backend/services/batch_lifecycle.py</code>、
+      <code>method_batching_bag.py</code>、
+      <code>method_batching_parallel.py</code>。
+    </div>
+  </section>
+
+  <!-- ============================================================
+       目录
+       ============================================================ -->
+  <section>
+    <h2>目录</h2>
+    <ol class="agenda">
+      <li>项目一：receipt-judge — 票据提取与批量重推</li>
+      <li>项目二：tts-bertvits2 — TTS 在线请求批处理</li>
+      <li>两个批处理思路的对比与课题关联</li>
+    </ol>
+  </section>
+
+  <!-- ============================================================
+       Part 1 · receipt-judge
+       ============================================================ -->
+  <section>
+    <section data-background-color="#1e293b">
+      <h2 style="color:#f8fafc;">Part 1</h2>
+      <h1 style="color:#f8fafc;">receipt-judge</h1>
+      <p style="color:#94a3b8;">智能报销票据提取与标注评估</p>
+    </section>
+
+    <!-- 项目概览 -->
+    <section>
+      <h3>项目概览</h3>
+      <ul>
+        <li>面向 OA 报销场景，接收 <em>PDF / PNG / JPG</em> 票据。</li>
+        <li>调用内网 Qwen 多模态模型，输出五大分类结构化 JSON
+          （<code>xcfy / zsfy / snjtje / qt / error</code>）。</li>
+        <li>提供 <em>SSE 流式查看</em>、<em>历史回看</em>、<em>人工标注</em>、
+          <em>重复票据检测</em>、<em>统计分析</em>。</li>
+        <li>同时为 OA 提供异步提取接口，供后续入库回填。</li>
+      </ul>
+      <p class="small">
+        技术栈：FastAPI · SQLAlchemy 2.0 async · React 19 · PostgreSQL · vLLM
+      </p>
+    </section>
+
+    <!-- 架构图 -->
+    <section>
+      <h3>整体架构</h3>
+      <div class="mermaid">
+flowchart LR
+  subgraph U[Mac 本机]
+    FE[React 19 前端<br/>5175]
+    BE[FastAPI 后端<br/>28012]
+  end
+  subgraph S[ai-dev 服务器]
+    PG[(PostgreSQL<br/>receipt-pg-dgx)]
+    GOV[Gov Verify<br/>Daemon 8014]
+  end
+  subgraph M[spark 推理节点]
+    GW[Caddy + CoreDNS<br/>llm.tdh-ai.com]
+    VLLM[vLLM / one-api<br/>Qwen3.5-35B]
+  end
+
+  FE -- Vite proxy /api --&gt; BE
+  BE --&gt; PG
+  BE --&gt; GOV
+  BE -- OpenAI 兼容 --&gt; GW --&gt; VLLM
+
+  OA[OA 系统] -. /api/extract .-&gt; BE
+      </div>
+    </section>
+
+    <!-- 把上下文给清楚后，切到 batch 主题 -->
+    <section data-background-color="#fafafa">
+      <h3>本项目里"批处理"长什么样</h3>
+      <div class="two-col">
+        <div>
+          <h4>① 标注队列 / 批量上传</h4>
+          <ul>
+            <li>前端一次性扔进 N 张票据。</li>
+            <li>浏览器侧维护 <em>worker pool</em>，
+              并发上传 + 轮询结果。</li>
+            <li>后端 asyncio 协程池消费。</li>
+          </ul>
+        </div>
+        <div>
+          <h4>② 批量重推（rerun batch）</h4>
+          <ul>
+            <li>选定某 receipt_type 下"错"的样本。</li>
+            <li>整批重新走模型，性能数据落库。</li>
+            <li>批次状态由<strong>后端自治</strong>收尾。</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- 批处理流程图：前端 worker pool -->
+    <section>
+      <h3>① 标注队列：前端 worker pool</h3>
+      <div class="mermaid">
+flowchart TB
+  classDef q fill:#fef3c7,stroke:#d97706,color:#7c2d12;
+  classDef w fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a;
+  classDef be fill:#dcfce7,stroke:#16a34a,color:#14532d;
+
+  U[用户多选 N 张票据]:::q --&gt; QR[(queueRef<br/>FIFO 队列)]:::q
+
+  subgraph POOL[Promise.all 起 poolSize 个 worker]
+    direction LR
+    W1[worker 1]:::w
+    W2[worker 2]:::w
+    Wn[worker ...]:::w
+  end
+
+  QR -- shift --&gt; POOL
+
+  POOL -- POST /api/extract --&gt; BE[FastAPI<br/>create_verify_session]:::be
+  BE -- session_id --&gt; POOL
+  POOL -- 轮询 GET /api/extract/&#123;id&#125; --&gt; BE
+  BE -- status=done --&gt; POOL
+  POOL --&gt; UI[更新单条状态<br/>queued / processing / done / error]
+      </div>
+      <p class="small">
+        默认 <code>poolSize = rerun_batch_concurrency = 64</code>，
+        队列空 + 全部 worker 退出 = 整批结束。
+      </p>
+    </section>
+
+    <!-- 批处理流程图：后端 worker pool + queue -->
+    <section>
+      <h3>① 后端：asyncio 协程池消费</h3>
+      <div class="mermaid">
+flowchart LR
+  classDef hot fill:#fee2e2,stroke:#dc2626,color:#7f1d1d;
+  classDef cold fill:#e0e7ff,stroke:#4338ca,color:#1e1b4b;
+
+  API[/POST /api/extract/] --&gt; ENQ[enqueue_extraction_job]
+  ENQ --&gt; Q[(EXTRACTION_JOB_QUEUE<br/>asyncio.Queue)]:::cold
+
+  subgraph WP[128 个 extraction_worker]
+    direction TB
+    EW1[worker #1]:::hot
+    EW2[worker #2]:::hot
+    EWN[worker #128]:::hot
+  end
+
+  Q -- get --&gt; WP
+  WP --&gt; PIPE[execute_extraction_pipeline<br/>多文件 asyncio.gather 并行]
+  PIPE --&gt; LLM[(LLM Gateway<br/>llm.tdh-ai.com)]
+  LLM --&gt; PIPE
+  PIPE --&gt; DB[(persist_extraction_success<br/>VerifySession=done)]
+  DB --&gt; FIN[try_finalize_batch]
+      </div>
+      <p class="small">
+        关键参数：<code>EXTRACTION_WORKER_CONCURRENCY=128</code>，
+        多文件 session 内部再用 <code>asyncio.gather</code> 二级并行。
+      </p>
+    </section>
+
+    <!-- 批处理流程图：rerun batch lifecycle (最核心) -->
+    <section>
+      <h3>② rerun batch 生命周期 <span class="tag">核心</span></h3>
+      <div class="mermaid">
+sequenceDiagram
+  autonumber
+  participant FE as 前端 AnnotatePage
+  participant API as POST /api/rerun-batches
+  participant DB as PostgreSQL
+  participant W as extraction_worker
+  participant FIN as try_finalize_batch
+
+  FE-&gt;&gt;API: receipt_type, mode, total_count
+  API-&gt;&gt;DB: INSERT RerunBatch(status=running)
+  API--&gt;&gt;FE: batch_id
+
+  loop poolSize 个 worker (前端 Promise.all)
+    FE-&gt;&gt;DB: POST /history/&#123;old&#125;/rerun (batch_id)
+    DB--&gt;&gt;W: 新 session(batch_id, status=queued)
+    W-&gt;&gt;DB: 终态 done / error / cancelled
+    W-&gt;&gt;FIN: 主动触发收尾
+    FIN-&gt;&gt;DB: SELECT ... FOR UPDATE batch
+    alt 所有子 session 都是终态
+      FIN-&gt;&gt;DB: 聚合 tokens / 时间，写 batch=done
+    else 还有未终态
+      FIN--&gt;&gt;W: noop
+    end
+  end
+
+  Note over FIN,DB: GET /api/rerun-batches 也会再扫一次 running 批次<br/>作为兜底，前端不再发 PATCH finish
+      </div>
+    </section>
+
+    <!-- 设计要点 -->
+    <section>
+      <h3>设计要点</h3>
+      <div class="two-col">
+        <div>
+          <h4>为什么"后端自治"收尾</h4>
+          <ul>
+            <li>前端可能<em>关页面 / 断网</em>，PATCH finish 不可靠。</li>
+            <li>每条 session 写终态时主动调 <code>try_finalize_batch</code>。</li>
+            <li><code>SELECT ... FOR UPDATE</code> 锁 batch 行，并发安全。</li>
+            <li>GET 接口扫 running 兜底，最终一致。</li>
+          </ul>
+        </div>
+        <div>
+          <h4>实时进度的取法</h4>
+          <ul>
+            <li>batch 表里的 success/failed 是收尾时一次性写。</li>
+            <li>跑批途中通过对 <code>sessions.status</code> 的
+              <code>GROUP BY</code> 聚合得到 live_counts。</li>
+            <li>索引 <code>idx_verify_sessions_batch_status</code>
+              让这条查询保持 O(group) 级。</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- 自动标注脚本：辅助批处理 -->
+    <section>
+      <h3>配套：auto_annotate.py 批量打标</h3>
+      <div class="mermaid">
+flowchart LR
+  S[扫描未标注文件<br/>分页拉 /api/history] --&gt; LOOP{每个文件}
+  LOOP --&gt; IMG[下载 preview JPEG]
+  IMG --&gt; VL[OpenRouter<br/>Qwen2.5-VL-72B]
+  VL --&gt; J[解析 JSON]
+  J -- 校验通过 --&gt; PATCH[PATCH /annotate]
+  J -- 字段非法 --&gt; SKIP[skip 计数]
+  PATCH --&gt; LOOP
+  SKIP --&gt; LOOP
+  LOOP -- 没有更多 --&gt; SUM[打印 Success/Fail/Skip]
+      </div>
+      <p class="small">
+        这是评估侧的批处理：用<strong>视觉大模型</strong>把"主线模型"产出的 JSON
+        反向打标，得到 receipt_type / file_source / quality_rating 三个维度，
+        用于后续统计准确率与脏数据。
+      </p>
+    </section>
+  </section>
+
+  <!-- ============================================================
+       Part 2 · tts-bertvits2
+       ============================================================ -->
+  <section>
+    <section data-background-color="#1e293b">
+      <h2 style="color:#f8fafc;">Part 2</h2>
+      <h1 style="color:#f8fafc;">tts-bertvits2</h1>
+      <p style="color:#94a3b8;">BertVITS2 TTS · 在线请求批处理</p>
+    </section>
+
+    <!-- 项目概览 -->
+    <section>
+      <h3>项目概览</h3>
+      <ul>
+        <li>基于 BertVITS2 的 TTS 服务，FastAPI + Uvicorn 部署。</li>
+        <li>支持中 / 英 / 混合语言、多说话人、风格参考文本。</li>
+        <li>瓶颈：单条请求 <em>BERT 编码 + 声码器前向</em> 占大头，
+          单卡难以同时跑很多条。</li>
+        <li>关键工作：把"逐条 .infer"改写成 <strong>批量并行前向</strong>，
+          再针对两种调用场景给出两种调度。</li>
+      </ul>
+    </section>
+
+    <!-- 三种推理路径对比 -->
+    <section>
+      <h3>三种推理路径</h3>
+      <table class="cmp">
+        <thead>
+          <tr><th>方法</th><th>来源</th><th>聚合方式</th><th>适用场景</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>serial</td>
+            <td><code>method_serial.py</code></td>
+            <td>不聚合，逐条 infer</td>
+            <td>baseline / 单元测试</td>
+          </tr>
+          <tr class="hl">
+            <td>bag</td>
+            <td><code>method_batching_bag.py</code></td>
+            <td><em>客户端已聚合</em>，一次扔一袋</td>
+            <td>离线批量合成、API 单次多条</td>
+          </tr>
+          <tr class="hl">
+            <td>bus</td>
+            <td><code>method_batching_parallel.py</code></td>
+            <td><em>服务器聚合</em>，公交发车模型</td>
+            <td>在线高并发 /tts</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="small">下面两页分别画 bag 与 bus 的流程图。</p>
+    </section>
+
+    <!-- bag 流程图 -->
+    <section>
+      <h3>方案 A · TTSBag（袋装请求）</h3>
+      <div class="mermaid">
+flowchart TB
+  classDef cpu fill:#fef9c3,stroke:#ca8a04,color:#713f12;
+  classDef gpu fill:#fee2e2,stroke:#dc2626,color:#7f1d1d;
+  classDef io  fill:#dcfce7,stroke:#16a34a,color:#14532d;
+
+  IN[一次调用传入 N 条<br/>BagItem utt_id/speaker/text]:::io
+  IN --&gt; CHUNK{N &gt; batch_size?}
+  CHUNK -- 否 --&gt; ONE[整袋 1 个 batch]
+  CHUNK -- 是 --&gt; SPL[按 batch_size 切块<br/>可选 sort_by_len]
+
+  ONE --&gt; SEG
+  SPL --&gt; SEG[CPU: clean_text<br/>+ 分段 + cache 查询]:::cpu
+  SEG --&gt; MB[BERT cache miss 部分<br/>批量 get_bert_batch]:::cpu
+  MB --&gt; CAT[特征拼接 / padding]:::cpu
+  CAT --&gt; FWD[net_g.infer<br/>一次 GPU 前向]:::gpu
+  FWD --&gt; SAVE[逐条 _trim_right<br/>返回 numpy / 写 WAV]:::io
+      </div>
+      <p class="small">
+        语义：bag 把"是否切块"交给参数，不做时间窗等待 ——
+        客户端已经把任务凑齐了。
+      </p>
+    </section>
+
+    <!-- bus 流程图 -->
+    <section>
+      <h3>方案 B · TTSBus（公交发车）<span class="tag">主重点</span></h3>
+      <div class="mermaid">
+flowchart LR
+  classDef hot fill:#fee2e2,stroke:#dc2626,color:#7f1d1d;
+  classDef cpu fill:#fef9c3,stroke:#ca8a04,color:#713f12;
+  classDef gpu fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a;
+
+  C1[Client 1<br/>/tts]:::hot --&gt; SUB
+  C2[Client 2<br/>/tts]:::hot --&gt; SUB
+  Cn[Client N<br/>/tts]:::hot --&gt; SUB
+
+  SUB[bus.submit<br/>返回 Future]:::cpu --&gt; Q[(queue.Queue)]:::cpu
+
+  subgraph WK[调度线程 _worker]
+    direction TB
+    FIRST[阻塞等第一名乘客] --&gt; WIN[开启 time_window_ms]
+    WIN --&gt; FILL{凑齐 max_batch<br/>或 超时?}
+    FILL -- 还能装 --&gt; GET[get next] --&gt; FILL
+    FILL -- 发车 --&gt; GROUP[按 _group_key 分车厢<br/>language / sdp_ratio / noise / style]
+  end
+
+  Q --&gt; FIRST
+  GROUP --&gt; PG[_process_group<br/>批量 BERT + pad + forward]:::gpu
+  PG --&gt; SET[set_future_result<br/>wav_bytes]
+  SET -.-&gt; C1
+  SET -.-&gt; C2
+  SET -.-&gt; Cn
+      </div>
+    </section>
+
+    <!-- TTSBus 调度细节 -->
+    <section>
+      <h3>TTSBus 的两层聚合</h3>
+      <div class="two-col">
+        <div>
+          <h4>第一层：时间窗 / max_batch</h4>
+          <ul>
+            <li>一个请求来了就<em>开窗</em>：<code>time_window_ms=50</code>。</li>
+            <li>窗口期内继续收，凑满 <code>max_batch=16</code> 提前发车。</li>
+            <li>超时也发车，保证延迟不退化。</li>
+          </ul>
+        </div>
+        <div>
+          <h4>第二层：_group_key 分组</h4>
+          <ul>
+            <li>同一批内 speaker 可不同，但
+              <em>language / sdp_ratio / noise_scale / style</em>
+              必须一致才能合并 forward。</li>
+            <li>不一致的拆成多个"车厢"，各跑一次 GPU。</li>
+            <li>speaker 不影响 batch 维度，仅作为 spk_id 喂入。</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="callout">
+        延迟 vs 吞吐：调 <code>time_window_ms</code> 大一点 → 吞吐 ↑、p99 ↑；
+        调小一点 → p99 ↓、吞吐 ↓。生产里按 SLA 反推。
+      </div>
+    </section>
+
+    <!-- BERT cache + cache hit -->
+    <section>
+      <h3>跨请求的 BERT 特征缓存</h3>
+      <div class="mermaid">
+flowchart TB
+  REQ[一批 tasks] --&gt; LOOP{每段文本}
+  LOOP --&gt; KEY[cache_key = norm|lang|style|weight]
+  KEY --&gt; HIT{命中?}
+  HIT -- 是 --&gt; USE[直接拿到 BERT 张量<br/>cache_hits++]
+  HIT -- 否 --&gt; MISS[加入 miss 列表<br/>cache_miss++]
+
+  MISS --&gt; BATCH[get_bert_batch<br/>一次性算所有 miss]
+  BATCH --&gt; PUT[cache_put + 回填到 task_segs]
+
+  USE --&gt; PAD[特征拼接 + padding]
+  PUT --&gt; PAD
+  PAD --&gt; FWD[一次 GPU 前向]
+      </div>
+      <p class="small">
+        AUTO 语种下还要先按句拆 zh / en 两组，再分别批量过 BERT，
+        因为 BERT 模型本身不共享。
+      </p>
+    </section>
+
+    <!-- 时序图：一次发车的耗时分解 -->
+    <section>
+      <h3>一次"发车"的耗时分解</h3>
+      <div class="mermaid">
+gantt
+  dateFormat  X
+  axisFormat  %L ms
+  title 一个 batch 的关键阶段（示意，单位 ms）
+
+  section CPU
+  prep_text (clean+seq+cache) :a1, 0, 8
+  BERT batch (miss only)      :a2, after a1, 22
+  concat + padding            :a3, after a2, 4
+
+  section GPU
+  net_g.infer forward         :b1, after a3, 60
+
+  section IO
+  trim + WAV encode + futures :c1, after b1, 6
+      </div>
+      <p class="small">
+        prep_text 几乎全是 CPU 张量操作，
+        所以可以和上一批的 GPU forward <em>流水化</em>（后续优化方向）。
+      </p>
+    </section>
+
+  </section>
+
+  <!-- ============================================================
+       Part 3 · 总结 / 与课题的关系
+       ============================================================ -->
+  <section>
+    <section data-background-color="#1e293b">
+      <h2 style="color:#f8fafc;">Part 3</h2>
+      <h1 style="color:#f8fafc;">两个批处理的对比</h1>
+      <p style="color:#94a3b8;">以及为什么和课题相关</p>
+    </section>
+
+    <!-- 对比表 -->
+    <section>
+      <h3>两种批处理的对比</h3>
+      <table class="cmp">
+        <thead>
+          <tr>
+            <th></th>
+            <th>receipt-judge · rerun batch</th>
+            <th>tts-bertvits2 · TTSBus</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>请求来源</td>
+            <td>人工触发的成百上千条文件</td>
+            <td>线上 /tts 高并发流量</td>
+          </tr>
+          <tr>
+            <td>聚合时机</td>
+            <td>批次创建时就知道全集</td>
+            <td>动态时间窗聚合</td>
+          </tr>
+          <tr>
+            <td>并行单位</td>
+            <td>asyncio 协程 × 128 worker</td>
+            <td>GPU batch 维度 × max_batch</td>
+          </tr>
+          <tr>
+            <td>瓶颈</td>
+            <td>远端 LLM 网关 RTT + token 数</td>
+            <td>本地 GPU forward 时长</td>
+          </tr>
+          <tr>
+            <td>收尾</td>
+            <td>事务 + 行锁，后端自治</td>
+            <td>Future.set_result，无需事务</td>
+          </tr>
+          <tr>
+            <td>失败兜底</td>
+            <td>GET 接口扫 running 兜底</td>
+            <td>逐条 Future.set_exception</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- 共性 -->
+    <section>
+      <h3>共性 = 课题切入点</h3>
+      <div class="mermaid">
+mindmap
+  root((批处理共性))
+    请求聚合
+      静态 (袋装 / rerun)
+      动态时间窗 (公交)
+    资源调度
+      worker pool 模型
+      max_concurrency 上限
+      group_key 分组前向
+    可观测
+      live_counts 实时聚合
+      逐阶段耗时 (prep/bert/fwd)
+      tokens/s · items/s
+    容错
+      行锁 + lazy 收尾
+      逐条 Future 异常隔离
+      cancel 支持
+      </div>
+    </section>
+
+    <!-- 课题关联 -->
+    <section>
+      <h3>与课题的关系</h3>
+      <ul>
+        <li>课题方向：<em>请求批处理 / 推理调度</em>。</li>
+        <li>receipt-judge 提供"<strong>多请求 + 远端 LLM</strong>"侧的工程样本：
+          强调<em>队列、并发、收尾一致性</em>。</li>
+        <li>tts-bertvits2 提供"<strong>本地 GPU 模型</strong>"侧的样本：
+          强调<em>时间窗聚合、按超参分组、跨请求特征缓存</em>。</li>
+        <li>两者拼在一起，覆盖了课题中"<em>上层调度</em>"和"<em>底层并行前向</em>"两层。</li>
+      </ul>
+      <div class="callout">
+        下一步打算：把 TTSBus 的"<em>双阶段流水</em>"思路反向迁移到
+        receipt-judge 的多文件 session（CPU 预处理 / 远端调用 流水化）。
+      </div>
+    </section>
+
+    <!-- 结束 -->
+    <section data-background-color="#0f172a">
+      <h2 style="color:#f8fafc;">谢谢</h2>
+      <p style="color:#94a3b8;">请指出哪些地方需要继续展开 ?</p>
+      <p class="small" style="color:#64748b; margin-top:2em;">
+        代码索引：<br/>
+        <code>~/receipt-judge/backend/routers/batches.py</code><br/>
+        <code>~/receipt-judge/backend/services/batch_lifecycle.py</code><br/>
+        <code>~/receipt-judge/backend/services/session_runtime.py</code><br/>
+        <code>~/tts-bertvits2/method_batching_bag.py</code><br/>
+        <code>~/tts-bertvits2/method_batching_parallel.py</code>
+      </p>
+    </section>
+
+  </section>
+
+</div>
+</div>
+
+<script type="module">
+  import Reveal from 'https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.esm.js';
+  import Highlight from 'https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/highlight.esm.js';
+  import Notes from 'https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/notes/notes.esm.js';
+  import Markdown from 'https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/markdown/markdown.esm.js';
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11.4.0/dist/mermaid.esm.min.mjs';
+
+  // mermaid 渲染：reveal 切片之前先把代码块编译成 SVG
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: 'default',
+    flowchart: { curve: 'basis', useMaxWidth: true },
+    sequence:  { useMaxWidth: true },
+    gantt:     { useMaxWidth: true },
+    themeVariables: {
+      fontFamily: 'system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif',
+      fontSize:   '15px'
+    }
+  });
+
+  // 把所有 .mermaid 节点的文本作为图源，渲染成 SVG 注入
+  async function renderAllMermaid() {
+    const nodes = Array.from(document.querySelectorAll('.mermaid'));
+    for (let i = 0; i < nodes.length; i++) {
+      const el = nodes[i];
+      if (el.dataset.rendered === '1') continue;
+      const src = el.textContent.trim();
+      try {
+        const { svg } = await mermaid.render('mmd-' + i, src);
+        el.innerHTML = svg;
+        el.dataset.rendered = '1';
+      } catch (e) {
+        el.innerHTML = '<pre style="color:#b91c1c;">mermaid 渲染失败: ' + e.message + '</pre>';
+      }
+    }
+  }
+
+  const deck = new Reveal({
+    hash: true,
+    slideNumber: 'c/t',
+    transition: 'slide',
+    width: 1280,
+    height: 760,
+    margin: 0.04,
+    minScale: 0.4,
+    maxScale: 1.6,
+    plugins: [ Highlight, Notes, Markdown ],
+  });
+
+  deck.initialize().then(async () => {
+    await renderAllMermaid();
+    // 切片后 reveal 需要重新计算位置
+    deck.layout();
+  });
+</script>
+</body>
+</html>
